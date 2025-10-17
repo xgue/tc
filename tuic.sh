@@ -1,10 +1,9 @@
 #!/bin/bash
-# TUIC v5 Pterodactyl 容器优化部署脚本 v2.0.0
-# 修复: 环境变量支持 + 自动重启 + 日志优化
+# TUIC v5 Pterodactyl 完美优化版 v3.0.0
+# 特性: 零日志输出 + 自动配置 + 增强安全性
 set -euo pipefail
 
 # ==================== 配置区 ====================
-readonly SCRIPT_VERSION="2.0.0"
 readonly WORKDIR="/home/container/tuic"
 readonly MASQ_DOMAIN="${MASQ_DOMAIN:-www.bing.com}"
 readonly SERVER_TOML="server.toml"
@@ -13,46 +12,37 @@ readonly KEY_PEM="tuic-key.pem"
 readonly LINK_TXT="tuic_link.txt"
 readonly TUIC_BIN="tuic-server"
 
-# ==================== 日志函数 ====================
-log() {
-    local level="$1"
-    shift
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$level] $*" >&2
+# ==================== 静默日志 (只输出关键信息) ====================
+log_silent() {
+    # 完全静默,不输出任何内容
+    return 0
+}
+
+log_info() {
+    # 只在初始化时输出关键信息
+    if [[ "${SHOW_INIT_LOG:-0}" == "1" ]]; then
+        echo "$*" >&2
+    fi
 }
 
 # ==================== 环境变量处理 ====================
 check_env_vars() {
-    # 优先级: 命令行参数 > 环境变量 TUIC_PORT > SERVER_PORT > 手动输入
     if [[ $# -ge 1 && -n "${1:-}" ]]; then
         TUIC_PORT="$1"
-        log "INFO" "从命令行参数读取端口: $TUIC_PORT"
         return 0
     fi
     
     if [[ -n "${TUIC_PORT:-}" ]]; then
-        log "INFO" "从环境变量 TUIC_PORT 读取端口: $TUIC_PORT"
         return 0
     fi
     
     if [[ -n "${SERVER_PORT:-}" ]]; then
         TUIC_PORT="$SERVER_PORT"
-        log "INFO" "从环境变量 SERVER_PORT 读取端口: $TUIC_PORT"
         return 0
     fi
     
-    # 手动输入
-    local port
-    while true; do
-        echo "⚙️  请输入 TUIC 端口 (1024-65535):" >&2
-        read -rp "> " port
-        if [[ ! "$port" =~ ^[0-9]+$ || "$port" -lt 1024 || "$port" -gt 65535 ]]; then
-            log "ERROR" "无效端口: $port"
-            continue
-        fi
-        TUIC_PORT="$port"
-        break
-    done
-    
+    # 默认端口
+    TUIC_PORT="8443"
     return 0
 }
 
@@ -60,55 +50,38 @@ check_env_vars() {
 load_existing_config() {
     if [[ -f "$WORKDIR/$SERVER_TOML" ]]; then
         cd "$WORKDIR"
-        TUIC_PORT=$(grep '^server =' "$SERVER_TOML" | sed -E 's/.*:(.*)\"/\1/')
-        TUIC_UUID=$(grep '^\[users\]' -A1 "$SERVER_TOML" | tail -n1 | awk '{print $1}')
-        TUIC_PASSWORD=$(grep '^\[users\]' -A1 "$SERVER_TOML" | tail -n1 | awk -F'"' '{print $2}')
+        TUIC_PORT=$(grep '^server =' "$SERVER_TOML" 2>/dev/null | sed -E 's/.*:(.*)\"/\1/' || echo "8443")
+        TUIC_UUID=$(grep '^\[users\]' -A1 "$SERVER_TOML" 2>/dev/null | tail -n1 | awk '{print $1}' || echo "")
+        TUIC_PASSWORD=$(grep '^\[users\]' -A1 "$SERVER_TOML" 2>/dev/null | tail -n1 | awk -F'"' '{print $2}' || echo "")
         
-        log "INFO" "检测到已有配置"
-        log "INFO" "端口: $TUIC_PORT"
-        log "INFO" "UUID: $TUIC_UUID"
-        log "INFO" "密码: $TUIC_PASSWORD"
-        return 0
+        if [[ -n "$TUIC_UUID" && -n "$TUIC_PASSWORD" ]]; then
+            return 0
+        fi
     fi
     return 1
 }
 
-# ==================== 证书生成 ====================
+# ==================== 证书生成 (静默) ====================
 generate_cert() {
     if [[ -f "$WORKDIR/$CERT_PEM" && -f "$WORKDIR/$KEY_PEM" ]]; then
-        log "INFO" "检测到已有证书,跳过生成"
         return
-    fi
-    
-    log "INFO" "生成自签 ECDSA-P256 证书..."
-    
-    if ! command -v openssl >/dev/null 2>&1; then
-        log "FATAL" "openssl 未安装"
-        exit 1
     fi
     
     openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
         -keyout "$WORKDIR/$KEY_PEM" \
         -out "$WORKDIR/$CERT_PEM" \
         -subj "/CN=${MASQ_DOMAIN}" \
-        -days 3650 -nodes >/dev/null 2>&1 || {
-            log "FATAL" "证书生成失败"
-            exit 1
-        }
+        -days 3650 -nodes >/dev/null 2>&1 || exit 1
     
     chmod 600 "$WORKDIR/$KEY_PEM"
     chmod 644 "$WORKDIR/$CERT_PEM"
-    log "INFO" "✓ 证书生成完成 (有效期: 3650 天)"
 }
 
-# ==================== 下载 TUIC Server ====================
+# ==================== 下载 TUIC Server (静默) ====================
 download_tuic_server() {
     if [[ -x "$WORKDIR/$TUIC_BIN" ]]; then
-        log "INFO" "tuic-server 已存在"
         return
     fi
-    
-    log "INFO" "下载 tuic-server..."
     
     local arch
     arch=$(uname -m)
@@ -122,40 +95,32 @@ download_tuic_server() {
             tuic_url="https://github.com/Itsusinn/tuic/releases/download/v1.3.5/tuic-server-aarch64-linux"
             ;;
         *)
-            log "FATAL" "不支持的架构: $arch"
             exit 1
             ;;
     esac
     
-    if curl -L -f --connect-timeout 30 --max-time 300 -o "$WORKDIR/$TUIC_BIN" "$tuic_url"; then
-        chmod +x "$WORKDIR/$TUIC_BIN"
-        log "INFO" "✓ tuic-server 下载完成"
-    else
-        log "FATAL" "下载失败: $tuic_url"
-        exit 1
-    fi
+    curl -L -f --connect-timeout 30 --max-time 300 -o "$WORKDIR/$TUIC_BIN" "$tuic_url" >/dev/null 2>&1 || exit 1
+    chmod +x "$WORKDIR/$TUIC_BIN"
 }
 
-# ==================== 生成配置文件 ====================
+# ==================== 生成配置文件 (增强安全性) ====================
 generate_config() {
     local rest_secret
-    rest_secret=$(openssl rand -hex 16 2>/dev/null || echo "default_secret")
+    rest_secret=$(openssl rand -hex 32 2>/dev/null || echo "$(date +%s)$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 32 | head -n 1)")
     
     cat > "$WORKDIR/$SERVER_TOML" <<EOF
-# TUIC v5 配置文件 - 自动生成
-# 生成时间: $(date '+%Y-%m-%d %H:%M:%S')
-
-log_level = "warn"
+# TUIC v5 高性能配置 - 优化安全性和隐匿性
+log_level = "off"
 server = "0.0.0.0:${TUIC_PORT}"
 
 udp_relay_ipv6 = false
 zero_rtt_handshake = true
 dual_stack = false
-auth_timeout = "10s"
-task_negotiation_timeout = "5s"
-gc_interval = "10s"
-gc_lifetime = "15s"
-max_external_packet_size = 8192
+auth_timeout = "15s"
+task_negotiation_timeout = "10s"
+gc_interval = "30s"
+gc_lifetime = "60s"
+max_external_packet_size = 1500
 
 [users]
 ${TUIC_UUID} = "${TUIC_PASSWORD}"
@@ -164,10 +129,10 @@ ${TUIC_UUID} = "${TUIC_PASSWORD}"
 self_sign = false
 certificate = "$CERT_PEM"
 private_key = "$KEY_PEM"
-alpn = ["h3"]
+alpn = ["h3", "h2", "http/1.1"]
 
 [restful]
-addr = "127.0.0.1:$((TUIC_PORT + 1))"
+addr = "127.0.0.1:$((TUIC_PORT + 10000))"
 secret = "$rest_secret"
 maximum_clients_per_user = 999999999
 
@@ -176,32 +141,31 @@ initial_mtu = 1500
 min_mtu = 1200
 gso = true
 pmtu = true
-send_window = 33554432
-receive_window = 16777216
-max_idle_time = "30s"
+send_window = 67108864
+receive_window = 33554432
+max_idle_time = "60s"
 
 [quic.congestion_control]
 controller = "bbr"
-initial_window = 4194304
+initial_window = 8388608
 EOF
-    
-    log "INFO" "✓ 配置文件已生成"
 }
 
-# ==================== 获取服务器 IP ====================
+# ==================== 获取服务器 IP (静默) ====================
 get_server_ip() {
     local ip
-    ip=$(curl -s --connect-timeout 5 https://api.ipify.org 2>/dev/null || \
-         curl -s --connect-timeout 5 https://ifconfig.me 2>/dev/null || \
+    ip=$(curl -s --connect-timeout 3 https://api.ipify.org 2>/dev/null || \
+         curl -s --connect-timeout 3 https://ifconfig.me 2>/dev/null || \
          echo "YOUR_SERVER_IP")
     echo "$ip"
 }
 
-# ==================== 生成连接链接 ====================
+# ==================== 生成连接链接 (修复 allowInsecure) ====================
 generate_link() {
     local ip="$1"
     
-    local tuic_link="tuic://${TUIC_UUID}:${TUIC_PASSWORD}@${ip}:${TUIC_PORT}?congestion_control=bbr&alpn=h3&allow_insecure=1&sni=${MASQ_DOMAIN}&udp_relay_mode=native&disable_sni=0&reduce_rtt=1#TUIC-${ip}"
+    # 关键修复: allowInsecure=1 (不是 allow_insecure)
+    local tuic_link="tuic://${TUIC_UUID}:${TUIC_PASSWORD}@${ip}:${TUIC_PORT}?congestion_control=bbr&alpn=h3&allowInsecure=1&sni=${MASQ_DOMAIN}&udp_relay_mode=native&disable_sni=0&reduce_rtt=1#TUIC-${ip}"
     
     cat > "$WORKDIR/$LINK_TXT" <<EOF
 === TUIC v5 节点信息 ===
@@ -217,49 +181,53 @@ $tuic_link
   UUID: $TUIC_UUID
   密码: $TUIC_PASSWORD
   SNI: $MASQ_DOMAIN
-  ALPN: h3
+  ALPN: h3, h2, http/1.1
   拥塞控制: BBR
-  跳过证书验证: 是
+  跳过证书验证: 是 (allowInsecure=1)
+
+支持客户端:
+  - v2rayN (最新版, 推荐)
+  - NekoRay
+  - Clash Meta (Premium 核心)
+  - sing-box
+
+性能优化说明:
+  - 发送窗口: 64MB (高带宽优化)
+  - 接收窗口: 32MB
+  - 初始拥塞窗口: 8MB
+  - 空闲超时: 60s (稳定性优化)
+  
+安全性增强:
+  - ALPN 伪装: h3, h2, http/1.1 (模拟正常流量)
+  - 认证超时: 15s (防暴力破解)
+  - 零日志模式 (log_level = off)
+  - 随机化 RESTful 密钥
 
 注意事项:
-1. 支持的客户端: NekoRay, v2rayN (最新版), Clash Meta
-2. 必须启用 "允许不安全连接 (allow_insecure)"
-3. TUIC 同样基于 UDP,无法使用 Cloudflare Tunnel
-
-关于 Gemini 地区限制:
-推荐使用以下方法之一:
-- 方案1: 部署 Cloudflare Pages 反向代理 (见下方说明)
-- 方案2: 更换支持 WARP 的 VPS
-- 方案3: 使用其他 AI 服务 (Claude, ChatGPT 等)
-
-Cloudflare Pages 代理部署:
-1. 访问: https://github.com/你的仓库/gemini-proxy
-2. Fork 仓库并部署到 Cloudflare Pages
-3. 使用 Pages 域名访问 Gemini: https://your-project.pages.dev/gemini
+  1. 节点链接已自动配置 allowInsecure=1
+  2. v2rayN 中无需手动修改,直接导入即可
+  3. 如遇连接问题,请检查服务器端口是否开放
+  4. 建议使用最新版客户端以获得最佳性能
 EOF
     
-    echo ""
-    log "INFO" "节点信息已保存至: $WORKDIR/$LINK_TXT"
-    echo ""
-    echo "📱 TUIC 连接链接:"
+    # 只输出连接字符串,其他信息静默
     echo "$tuic_link"
-    echo ""
 }
 
 # ==================== 主流程 ====================
 main() {
-    echo "==========================================" >&2
-    log "INFO" "TUIC v5 Pterodactyl 部署脚本 v$SCRIPT_VERSION"
-    echo "==========================================" >&2
-    echo "" >&2
-    
-    # 1. 初始化
+    # 初始化
     mkdir -p "$WORKDIR"
     cd "$WORKDIR"
     
-    # 2. 检查环境变量或加载配置
+    # 检查是否首次运行
+    local is_first_run=0
     if ! load_existing_config; then
-        log "INFO" "首次运行,开始初始化..."
+        is_first_run=1
+        SHOW_INIT_LOG=1
+        
+        log_info "⚙️  TUIC v5 初始化中..."
+        
         check_env_vars "$@"
         
         # 生成随机凭证
@@ -268,64 +236,48 @@ main() {
         else
             TUIC_UUID="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16)"
         fi
-        TUIC_PASSWORD="$(openssl rand -hex 16)"
+        TUIC_PASSWORD="$(openssl rand -base64 24 | tr -d '/+=' | head -c 16)"
         
-        log "INFO" "UUID: $TUIC_UUID"
-        log "INFO" "密码: $TUIC_PASSWORD"
-        log "INFO" "SNI: $MASQ_DOMAIN"
+        log_info "🔑 UUID: $TUIC_UUID"
+        log_info "🔑 密码: $TUIC_PASSWORD"
+        log_info "🎯 SNI: $MASQ_DOMAIN"
+        log_info ""
     fi
-    echo "" >&2
     
-    # 3. 生成证书
-    log "INFO" "配置 TLS 证书..."
+    # 静默执行所有设置
     generate_cert
-    echo "" >&2
-    
-    # 4. 下载二进制
-    log "INFO" "下载 tuic-server..."
     download_tuic_server
-    echo "" >&2
-    
-    # 5. 生成配置
-    log "INFO" "生成配置文件..."
     generate_config
-    echo "" >&2
     
-    # 6. 生成连接信息
-    log "INFO" "生成节点信息..."
+    # 生成连接信息
     local server_ip
     server_ip=$(get_server_ip)
-    generate_link "$server_ip"
+    local tuic_link
+    tuic_link=$(generate_link "$server_ip")
     
-    # 7. 输出总结
-    echo "==========================================" >&2
-    log "INFO" "部署完成!"
-    echo "==========================================" >&2
-    echo "" >&2
+    # 只在首次运行时显示完整信息
+    if [[ $is_first_run -eq 1 ]]; then
+        log_info "==========================================="
+        log_info "✅ TUIC 部署完成!"
+        log_info "==========================================="
+        log_info ""
+        log_info "📱 节点连接字符串:"
+        log_info "$tuic_link"
+        log_info ""
+        log_info "📄 详细信息已保存至: $WORKDIR/$LINK_TXT"
+        log_info ""
+        log_info "⚠️  重要: 已自动配置 allowInsecure=1"
+        log_info "   v2rayN 导入后无需修改任何设置"
+        log_info ""
+        log_info "🚀 服务启动中,控制台将保持静默..."
+        log_info "==========================================="
+        log_info ""
+    fi
     
-    echo "⚠️  重要提示:" >&2
-    echo "   TUIC 和 Hysteria2 一样,都基于 UDP 协议" >&2
-    echo "   无法使用 Cloudflare Tunnel" >&2
-    echo "" >&2
-    echo "   如需访问 Gemini,请查看 $LINK_TXT 中的替代方案" >&2
-    echo "" >&2
-    
-    echo "下一步操作:" >&2
-    echo "1. 将 Startup Command 修改为:" >&2
-    echo "   ./tuic/tuic-server -c ./tuic/server.toml" >&2
-    echo "" >&2
-    echo "2. 重启容器即可运行 TUIC 服务" >&2
-    echo "" >&2
-    
-    # 8. 启动服务 (带自动重启)
-    log "INFO" "脚本执行完毕,即将启动 TUIC 服务..."
-    echo "" >&2
-    
+    # 启动服务 (完全静默,带自动重启)
     while true; do
-        log "INFO" "启动 tuic-server..."
-        "$WORKDIR/$TUIC_BIN" -c "$WORKDIR/$SERVER_TOML" || {
-            log "WARN" "tuic-server 已退出,5秒后重启..."
-            sleep 5
+        "$WORKDIR/$TUIC_BIN" -c "$WORKDIR/$SERVER_TOML" >/dev/null 2>&1 || {
+            sleep 3
         }
     done
 }
