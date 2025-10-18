@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Hysteria2 游戏容器专用版 v6.0.0
-# 特性: 下载不限 + 上传严控 = 高速且不断网
+# Hysteria2 游戏容器专用版 v6.0.1 - 修复版
+# 修复: bandwidth down 参数错误
 set -euo pipefail
 
 # ==================== 配置区 ====================
-readonly SCRIPT_VERSION="6.0.0"
+readonly SCRIPT_VERSION="6.0.1"
 readonly WORKDIR="/home/container/hysteria"
 readonly BINNAME="hysteria"
 readonly NODETXT="/home/container/node.txt"
@@ -15,8 +15,7 @@ readonly HY2_VERSION="v2.6.4"
 # 游戏容器优化配置
 readonly SNI="www.bing.com"
 readonly ALPN="h3"
-readonly DOWNLOAD_LIMIT="0"      # 0 = 不限制下载
-readonly UPLOAD_LIMIT="10mbps"   # 严格限制上传
+readonly DEFAULT_UPLOAD="10mbps"
 
 # ==================== 静默模式 ====================
 log_init() {
@@ -54,6 +53,9 @@ parse_args() {
     else
         SERVER_DOMAIN=$(curl -s --connect-timeout 5 --max-time 10 https://api.ipify.org 2>/dev/null || echo "YOUR_IP")
     fi
+    
+    # 上传限制参数
+    UPLOAD_BW="${UPLOAD_LIMIT:-$DEFAULT_UPLOAD}"
 }
 
 # ==================== 架构检测 ====================
@@ -97,15 +99,11 @@ generate_cert() {
     return 0
 }
 
-# ==================== 生成配置 (游戏容器专用!) ====================
+# ==================== 生成配置 (修复版!) ====================
 generate_config() {
-    # 根据 UPLOAD_LIMIT 参数决定配置
-    local upload_bw="${UPLOAD_LIMIT:-10mbps}"
-    local download_bw="${DOWNLOAD_LIMIT:-0}"
-    
     cat > "$WORKDIR/config.yaml" <<EOF
 # Hysteria2 游戏容器专用配置 v${SCRIPT_VERSION}
-# 策略: 下载不限 + 上传严控 = 高速且不断网
+# 修复: down 参数改为高值而非 0
 # 生成时间: $(date '+%Y-%m-%d %H:%M:%S')
 
 listen: :${PORT}
@@ -126,19 +124,19 @@ masquerade:
     url: https://www.bing.com
     rewriteHost: true
 
-# 游戏容器专用带宽配置
+# 游戏容器专用带宽配置 (修复版)
 bandwidth:
-  up: ${upload_bw}      # 上传严格限制 (防止 CPU/内存暴涨)
-  down: ${download_bw}  # 下载不限制 (0 = 无限制)
+  up: ${UPLOAD_BW}      # 上传严格限制
+  down: 1gbps           # 下载高限制 (实际不会达到,容器会自动限制)
 
 # QUIC 保守配置 (降低资源占用)
 quic:
-  initStreamReceiveWindow: 4194304       # 4MB (保守)
+  initStreamReceiveWindow: 4194304       # 4MB
   maxStreamReceiveWindow: 4194304        # 4MB
-  initConnReceiveWindow: 8388608         # 8MB (保守)
+  initConnReceiveWindow: 8388608         # 8MB
   maxConnReceiveWindow: 8388608          # 8MB
-  maxIdleTimeout: 90s                    # 长超时 (防误断)
-  maxIncomingStreams: 64                 # 低并发 (省资源)
+  maxIdleTimeout: 90s
+  maxIncomingStreams: 64
   disablePathMTUDiscovery: false
 EOF
 }
@@ -150,7 +148,7 @@ generate_node_info() {
     cat > "$NODETXT" <<EOF
 === Hysteria2 游戏容器专用节点 ===
 生成时间: $(date '+%Y-%m-%d %H:%M:%S')
-脚本版本: v${SCRIPT_VERSION}
+脚本版本: v${SCRIPT_VERSION} (修复版)
 
 📱 节点链接:
 $hy2_url
@@ -163,48 +161,28 @@ $hy2_url
   ALPN: ${ALPN}
 
 ⚡ 游戏容器专用优化:
-  策略: 下载不限 + 上传严控
+  上传带宽: ${UPLOAD_BW} (严格限制)
+  下载带宽: 1gbps (高限制,实际由容器决定)
   
-  下载带宽: 不限制 (充分利用容器下载带宽)
-  上传带宽: ${UPLOAD_LIMIT} (严格限制,防止崩溃)
-  
-  窗口大小: 4MB/8MB (保守,降低内存占用)
-  并发流数: 64 (降低 CPU 占用)
-  超时时间: 90s (避免误断连)
+  窗口大小: 4MB/8MB (保守)
+  并发流数: 64 (低)
+  超时时间: 90s (长)
 
 📊 预期性能:
-  下载测速: 80-120+ Mbps ⚡ (不限制)
-  上传测速: 8-10 Mbps 🔒 (受限但稳定)
-  断网情况: 完全消失 ✅
-  
-  CPU 占用: 正常 (不会暴涨)
-  内存占用: 低 (< 50MB)
-  稳定性: 100%
-
-🎮 为什么专为游戏容器优化?
-  1. 游戏容器特点:
-     - 下载带宽充足 (100+ Mbps)
-     - 上传带宽受限 (10-20 Mbps)
-     - CPU/内存优先给游戏
-  
-  2. 优化策略:
-     - 下载不限 → 充分利用带宽
-     - 上传严控 → 避免资源暴涨
-     - 窗口保守 → 降低内存占用
-     - 超时延长 → 避免误断连
+  下载测速: 80-120 Mbps
+  上传测速: 根据限制 (${UPLOAD_BW})
+  断网情况: 不应断网
 
 🔄 调整上传限制:
-  如果仍然断网,可以进一步降低:
-  UPLOAD_LIMIT=5mbps bash <(curl ...)
-  
-  如果稳定,可以适当提高:
-  UPLOAD_LIMIT=15mbps bash <(curl ...)
+  UPLOAD_LIMIT=5mbps bash <(curl ...)   # 更保守
+  UPLOAD_LIMIT=15mbps bash <(curl ...)  # 稍微激进
+  UPLOAD_LIMIT=20mbps bash <(curl ...)  # 极限测试
 
 📝 测速建议:
-  1. 不要用 Speedtest 全双工模式
-  2. 先单独测下载 → 等 30 秒
-  3. 再单独测上传 → 避免同时测
-  4. 或者只测下载,忽略上传
+  1. 先单独测下载
+  2. 等待 30 秒
+  3. 再单独测上传
+  4. 避免同时测试
 
 🎯 客户端配置:
 server: ${SERVER_DOMAIN}:${PORT}
@@ -213,9 +191,6 @@ tls:
   sni: ${SNI}
   alpn: [${ALPN}]
   insecure: true
-bandwidth:
-  up: 10mbps
-  down: 0
 socks5:
   listen: 127.0.0.1:1080
 http:
@@ -229,6 +204,12 @@ http:
 
 🚀 启动命令:
   ./hysteria/hysteria server -c ./hysteria/config.yaml
+
+🔧 v${SCRIPT_VERSION} 修复内容:
+  - 修复 bandwidth down: 0 错误
+  - 改为 down: 1gbps (高值)
+  - 实际速度由容器带宽决定
+  - 应该可以正常连接了!
 EOF
     
     echo "$hy2_url"
@@ -243,9 +224,11 @@ main() {
     parse_args "$@"
     
     log_init "⚙️  Hysteria2 游戏容器专用版初始化..."
+    log_init "📝 修复版本: v${SCRIPT_VERSION}"
     log_init "🔑 密码: $HY2_PASSWORD"
     log_init "🌐 服务器: $SERVER_DOMAIN"
     log_init "🔌 端口: $PORT"
+    log_init "⬆️  上传限制: $UPLOAD_BW"
     log_init ""
     
     local arch
@@ -277,8 +260,12 @@ main() {
     log_final "   🔑 密码: ${HY2_PASSWORD}"
     log_final ""
     log_final "⚡ 优化策略:"
-    log_final "   ⬇️  下载: 不限制 (预期 80-120+ Mbps)"
-    log_final "   ⬆️  上传: ${UPLOAD_LIMIT} (严格限制,防崩溃)"
+    log_final "   ⬆️  上传: ${UPLOAD_BW} (严格限制)"
+    log_final "   ⬇️  下载: 1gbps (高限制,实际由容器决定)"
+    log_final ""
+    log_final "🔧 v6.0.1 修复:"
+    log_final "   - 修复 bandwidth down: 0 错误"
+    log_final "   - 节点应该可以正常连接了!"
     log_final ""
     log_final "📱 节点链接:"
     log_final "$hy2_url"
@@ -289,10 +276,6 @@ main() {
     log_final "   - 先测下载 (单独)"
     log_final "   - 等 30 秒"
     log_final "   - 再测上传 (单独)"
-    log_final "   - 不要同时测!"
-    log_final ""
-    log_final "🔄 如果仍断网:"
-    log_final "   UPLOAD_LIMIT=5mbps bash <(curl ...) # 降低上传限制"
     log_final ""
     log_final "=========================================================================="
     log_final ""
