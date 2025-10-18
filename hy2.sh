@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Hysteria2 游戏容器专用版 v6.0.1 - 修复版
-# 修复: bandwidth down 参数错误
+# Hysteria2 游戏容器专用版 v6.0.2 - 修复下载速度
+# 修复: bandwidth 参数对调 + 窗口增大
 set -euo pipefail
 
 # ==================== 配置区 ====================
-readonly SCRIPT_VERSION="6.0.1"
+readonly SCRIPT_VERSION="6.0.2"
 readonly WORKDIR="/home/container/hysteria"
 readonly BINNAME="hysteria"
 readonly NODETXT="/home/container/node.txt"
@@ -15,7 +15,7 @@ readonly HY2_VERSION="v2.6.4"
 # 游戏容器优化配置
 readonly SNI="www.bing.com"
 readonly ALPN="h3"
-readonly DEFAULT_UPLOAD="10mbps"
+readonly DEFAULT_UPLOAD_LIMIT="20mbps"  # 默认限制上传
 
 # ==================== 静默模式 ====================
 log_init() {
@@ -55,7 +55,7 @@ parse_args() {
     fi
     
     # 上传限制参数
-    UPLOAD_BW="${UPLOAD_LIMIT:-$DEFAULT_UPLOAD}"
+    UPLOAD_LIMIT_VALUE="${UPLOAD_LIMIT:-$DEFAULT_UPLOAD_LIMIT}"
 }
 
 # ==================== 架构检测 ====================
@@ -99,11 +99,11 @@ generate_cert() {
     return 0
 }
 
-# ==================== 生成配置 (修复版!) ====================
+# ==================== 生成配置 (对调版!) ====================
 generate_config() {
     cat > "$WORKDIR/config.yaml" <<EOF
 # Hysteria2 游戏容器专用配置 v${SCRIPT_VERSION}
-# 修复: down 参数改为高值而非 0
+# 关键修复: bandwidth 参数对调 + 窗口增大
 # 生成时间: $(date '+%Y-%m-%d %H:%M:%S')
 
 listen: :${PORT}
@@ -124,19 +124,21 @@ masquerade:
     url: https://www.bing.com
     rewriteHost: true
 
-# 游戏容器专用带宽配置 (修复版)
+# 带宽配置 (修复: 对调 up 和 down)
+# Hysteria2 的视角: up = 服务器上传 = 客户端下载
+#                   down = 服务器下载 = 客户端上传
 bandwidth:
-  up: ${UPLOAD_BW}      # 上传严格限制
-  down: 1gbps           # 下载高限制 (实际不会达到,容器会自动限制)
+  up: 1gbps                    # 客户端下载不限制
+  down: ${UPLOAD_LIMIT_VALUE}  # 客户端上传严格限制
 
-# QUIC 保守配置 (降低资源占用)
+# QUIC 配置 (增大窗口提高吞吐量)
 quic:
-  initStreamReceiveWindow: 4194304       # 4MB
-  maxStreamReceiveWindow: 4194304        # 4MB
-  initConnReceiveWindow: 8388608         # 8MB
-  maxConnReceiveWindow: 8388608          # 8MB
+  initStreamReceiveWindow: 16777216      # 16MB (从 4MB 提升)
+  maxStreamReceiveWindow: 16777216       # 16MB
+  initConnReceiveWindow: 33554432        # 32MB (从 8MB 提升)
+  maxConnReceiveWindow: 33554432         # 32MB
   maxIdleTimeout: 90s
-  maxIncomingStreams: 64
+  maxIncomingStreams: 128                # 从 64 提升
   disablePathMTUDiscovery: false
 EOF
 }
@@ -148,7 +150,7 @@ generate_node_info() {
     cat > "$NODETXT" <<EOF
 === Hysteria2 游戏容器专用节点 ===
 生成时间: $(date '+%Y-%m-%d %H:%M:%S')
-脚本版本: v${SCRIPT_VERSION} (修复版)
+脚本版本: v${SCRIPT_VERSION} (修复下载速度)
 
 📱 节点链接:
 $hy2_url
@@ -160,23 +162,35 @@ $hy2_url
   SNI: ${SNI}
   ALPN: ${ALPN}
 
-⚡ 游戏容器专用优化:
-  上传带宽: ${UPLOAD_BW} (严格限制)
-  下载带宽: 1gbps (高限制,实际由容器决定)
+⚡ 游戏容器专用优化 (v6.0.2 修复):
+  问题: v6.0.1 下载只有 5-7 Mbps
+  原因: bandwidth 参数含义理解错误
   
-  窗口大小: 4MB/8MB (保守)
-  并发流数: 64 (低)
-  超时时间: 90s (长)
+  修复前配置:
+  up: 10mbps   (误以为是上传限制)
+  down: 1gbps  (误以为是下载限制)
+  
+  实际含义:
+  up = 服务器上传 = 客户端下载 ⬇️
+  down = 服务器下载 = 客户端上传 ⬆️
+  
+  修复后配置:
+  up: 1gbps               (客户端下载不限)
+  down: ${UPLOAD_LIMIT_VALUE}  (客户端上传限制)
+  
+  窗口大小: 16MB/32MB (提升吞吐量)
+  并发流数: 128 (提升性能)
 
-📊 预期性能:
-  下载测速: 80-120 Mbps
-  上传测速: 根据限制 (${UPLOAD_BW})
+📊 预期性能 (修复后):
+  下载测速: 80-120 Mbps ⚡ (应该正常了)
+  上传测速: 根据限制 (${UPLOAD_LIMIT_VALUE})
   断网情况: 不应断网
 
 🔄 调整上传限制:
-  UPLOAD_LIMIT=5mbps bash <(curl ...)   # 更保守
-  UPLOAD_LIMIT=15mbps bash <(curl ...)  # 稍微激进
-  UPLOAD_LIMIT=20mbps bash <(curl ...)  # 极限测试
+  UPLOAD_LIMIT=10mbps bash <(curl ...)  # 更保守
+  UPLOAD_LIMIT=15mbps bash <(curl ...)  # 默认
+  UPLOAD_LIMIT=20mbps bash <(curl ...)  # 当前默认
+  UPLOAD_LIMIT=30mbps bash <(curl ...)  # 稍激进
 
 📝 测速建议:
   1. 先单独测下载
@@ -205,11 +219,15 @@ http:
 🚀 启动命令:
   ./hysteria/hysteria server -c ./hysteria/config.yaml
 
-🔧 v${SCRIPT_VERSION} 修复内容:
-  - 修复 bandwidth down: 0 错误
-  - 改为 down: 1gbps (高值)
-  - 实际速度由容器带宽决定
-  - 应该可以正常连接了!
+🔧 v6.0.2 修复内容:
+  ✅ bandwidth up/down 参数对调
+  ✅ 窗口从 4MB/8MB 提升到 16MB/32MB
+  ✅ 并发流从 64 提升到 128
+  ✅ 下载速度应该恢复正常 (80-120 Mbps)
+
+🧪 对比测试:
+  v6.0.1: 下载 5-7 Mbps, 上传 20 Mbps ❌
+  v6.0.2: 下载 80-120 Mbps, 上传 20 Mbps ✅ (预期)
 EOF
     
     echo "$hy2_url"
@@ -224,11 +242,12 @@ main() {
     parse_args "$@"
     
     log_init "⚙️  Hysteria2 游戏容器专用版初始化..."
-    log_init "📝 修复版本: v${SCRIPT_VERSION}"
+    log_init "📝 修复版本: v${SCRIPT_VERSION} (修复下载速度)"
     log_init "🔑 密码: $HY2_PASSWORD"
     log_init "🌐 服务器: $SERVER_DOMAIN"
     log_init "🔌 端口: $PORT"
-    log_init "⬆️  上传限制: $UPLOAD_BW"
+    log_init "⬆️  客户端上传限制: $UPLOAD_LIMIT_VALUE"
+    log_init "⬇️  客户端下载: 不限制 (1gbps)"
     log_init ""
     
     local arch
@@ -259,13 +278,14 @@ main() {
     log_final "   🔌 端口: ${PORT}"
     log_final "   🔑 密码: ${HY2_PASSWORD}"
     log_final ""
-    log_final "⚡ 优化策略:"
-    log_final "   ⬆️  上传: ${UPLOAD_BW} (严格限制)"
-    log_final "   ⬇️  下载: 1gbps (高限制,实际由容器决定)"
+    log_final "🔧 v6.0.2 关键修复:"
+    log_final "   ❌ 之前: 下载 5-7 Mbps (参数理解错误)"
+    log_final "   ✅ 现在: 下载应该 80-120 Mbps (参数对调)"
     log_final ""
-    log_final "🔧 v6.0.1 修复:"
-    log_final "   - 修复 bandwidth down: 0 错误"
-    log_final "   - 节点应该可以正常连接了!"
+    log_final "⚡ 优化策略:"
+    log_final "   ⬇️  下载: 不限制 (充分利用带宽)"
+    log_final "   ⬆️  上传: ${UPLOAD_LIMIT_VALUE} (防止崩溃)"
+    log_final "   📦 窗口: 16MB/32MB (提升吞吐)"
     log_final ""
     log_final "📱 节点链接:"
     log_final "$hy2_url"
@@ -273,9 +293,9 @@ main() {
     log_final "📄 详细信息: ${NODETXT}"
     log_final ""
     log_final "⚠️  测速建议:"
-    log_final "   - 先测下载 (单独)"
+    log_final "   - 先测下载 (应该 80-120 Mbps)"
     log_final "   - 等 30 秒"
-    log_final "   - 再测上传 (单独)"
+    log_final "   - 再测上传 (应该约 ${UPLOAD_LIMIT_VALUE})"
     log_final ""
     log_final "=========================================================================="
     log_final ""
